@@ -918,3 +918,7 @@ func (c *Conn) Multi(ops MultiOps) error {
 	_, err := c.request(opMulti, req, res, nil)
 	return err
 }
+
+func (c *Conn) NewLock(path string, acl []ACL) Locker {
+	return NewLock(c, path, acl)
+}

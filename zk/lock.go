@@ -14,6 +14,13 @@ var (
 	ErrLockTimeout = errors.New("zk: timeout trying to acquire lock")
 )
 
+type Locker interface {
+	Lock() error
+	Unlock() error
+	SetTTL(time.Duration)
+	SetTimeout(time.Duration)
+}
+
 type Lock struct {
 	c                  *Conn
 	path               string
