@@ -33,6 +33,11 @@ type Stat struct {
 	Pzxid          int64 // last modified children
 }
 
+type serverList struct {
+	addrs []string
+	index int
+}
+
 type requestHeader struct {
 	Xid    int32
 	Opcode int32
@@ -581,4 +586,36 @@ func responseStructForOp(op int32) interface{} {
 		return &multiResponse{}
 	}
 	return nil
+}
+
+func (s *serverList) contains(addr string) bool {
+	for _, a := range s.addrs {
+		if a == addr {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *serverList) changed(addrs []string) bool {
+	if len(addrs) != len(s.addrs) {
+		return true
+	}
+
+	for _, addr := range addrs {
+		if !s.contains(addr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (s *serverList) next() string {
+	s.index = (s.index + 1) % len(s.addrs)
+	return s.addrs[s.index]
+}
+
+func (s *serverList) hasNext() bool {
+	return len(s.addrs) > 0 && s.index+1 < len(s.addrs)
 }

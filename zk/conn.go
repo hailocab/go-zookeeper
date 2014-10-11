@@ -58,8 +58,6 @@ type Conn struct {
 	passwd    []byte
 
 	dialer         Dialer
-	servers        []string
-	serverIndex    int
 	conn           net.Conn
 	eventChan      chan Event
 	shouldQuit     chan bool
@@ -72,6 +70,13 @@ type Conn struct {
 	requestsLock sync.Mutex
 	watchers     map[watchPathType][]chan Event
 	watchersLock sync.Mutex
+
+	// servers config
+	serversLock                     sync.Mutex // guards serverLists', reconfig, pNew, pOld
+	servers, oldServers, newServers *serverList
+	reconfig                        bool
+	pNew                            float64
+	pOld                            float64
 
 	// Debug (used by unit tests)
 	reconnectDelay time.Duration
@@ -125,8 +130,7 @@ func ConnectWithDialer(servers []string, recvTimeout time.Duration, dialer Diale
 	timeout := int32(30000)
 	conn := Conn{
 		dialer:         dialer,
-		servers:        servers,
-		serverIndex:    startIndex,
+		servers:        &serverList{addrs: servers, index: startIndex},
 		conn:           nil,
 		state:          StateDisconnected,
 		eventChan:      ec,
@@ -162,6 +166,103 @@ func (c *Conn) Close() {
 	}
 }
 
+func (c *Conn) cycleNextServer() string {
+	c.serversLock.Lock()
+	defer c.serversLock.Unlock()
+
+	if c.reconfig {
+		server, err := c.getNextServerInReconfig()
+		if err == nil {
+			return server
+		}
+		log.Warnf("[Zookeeper] Failed to get next server in reconfig: %v", err)
+		c.reconfig = false
+	}
+
+	return c.servers.next()
+}
+
+func (c *Conn) getNextServerInReconfig() (string, error) {
+	takeNew := mathrand.Float64() <= c.pNew
+
+	if (c.newServers != nil && c.newServers.hasNext()) && (takeNew || (c.oldServers != nil && !c.oldServers.hasNext())) {
+		return c.newServers.next(), nil
+	}
+
+	if c.oldServers != nil && c.oldServers.hasNext() {
+		return c.oldServers.next(), nil
+	}
+
+	return "", fmt.Errorf("Could not find next server")
+}
+
+func (c *Conn) UpdateAddrs(addrs []string) error {
+	if len(addrs) == 0 {
+		return fmt.Errorf("New server list cannot be empty")
+	}
+
+	c.serversLock.Lock()
+	defer c.serversLock.Unlock()
+
+	if !c.servers.changed(addrs) {
+		return nil
+	}
+
+	for i, addr := range addrs {
+		if !strings.Contains(addr, ":") {
+			addrs[i] = addr + ":" + strconv.Itoa(DefaultPort)
+		}
+	}
+
+	servers := &serverList{addrs: addrs}
+	foundCurrent := servers.contains(c.servers.addrs[c.servers.index])
+	c.reconfig = true
+	c.oldServers = &serverList{}
+	c.newServers = &serverList{}
+
+	for _, addr := range addrs {
+		if c.servers.contains(addr) {
+			c.oldServers.addrs = append(c.oldServers.addrs, addr)
+		} else {
+			c.newServers.addrs = append(c.newServers.addrs, addr)
+		}
+	}
+
+	numOld := float64(len(c.oldServers.addrs))
+	numNew := float64(len(c.newServers.addrs))
+	numCur := float64(len(c.servers.addrs))
+
+	if (numOld + numNew) > numCur {
+		if foundCurrent {
+			if mathrand.Float64() <= (numCur / (numOld + numNew)) {
+				c.pNew = 1.0
+				c.pOld = 0.0
+			} else {
+				c.reconfig = false
+			}
+		} else {
+			c.pNew = 1.0
+			c.pOld = 0.0
+		}
+	} else {
+		if foundCurrent {
+			c.reconfig = true
+		} else {
+			c.pOld = (numOld * (numCur - (numOld + numNew))) / ((numOld + numNew) * (numCur - numOld))
+			c.pNew = 1.0 - c.pOld
+		}
+	}
+
+	c.servers = servers
+
+	if c.reconfig && (c.State() == StateConnected) {
+		c.conn.Close()
+		c.setState(StateDisconnected)
+	}
+
+	return nil
+}
+
 // Reconnect closes the underlying network connection to zookeeper
 // This will trigger both the send and recv loops to exit and requests to flush
 // and then we will automatically attempt to reconnect
@@ -183,24 +284,23 @@ func (c *Conn) setState(state State) {
 }
 
 func (c *Conn) connect() error {
-	c.serverIndex = (c.serverIndex + 1) % len(c.servers)
-	startIndex := c.serverIndex
 	c.setState(StateConnecting)
+
 	for {
-		zkConn, err := c.dialer("tcp", c.servers[c.serverIndex], c.connectTimeout)
+		server := c.cycleNextServer()
+		zkConn, err := c.dialer("tcp", server, c.connectTimeout)
 		if err == nil {
 			c.conn = zkConn
 			c.setState(StateConnected)
 			return nil
 		}
 
-		log.Warnf("[Zookeeper] Failed to connect to %s: %+v", c.servers[c.serverIndex], err)
-
-		c.serverIndex = (c.serverIndex + 1) % len(c.servers)
-		if c.serverIndex == startIndex {
+		log.Warnf("[Zookeeper] Failed to connect to %s: %+v", server, err)
+		if !c.servers.hasNext() {
 			c.flushUnsentRequests(ErrNoServer)
 			time.Sleep(time.Second)
 		}
+
 		// should we bail? we don't want to lock here forever if something has called Close()
 		select {
 		case <-c.shouldQuit:

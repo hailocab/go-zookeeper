@@ -5,6 +5,40 @@ import (
 	"testing"
 )
 
+func TestServerList(t *testing.T) {
+	testAddrs := [][]string{
+		[]string{"1.2.3.4"},
+		[]string{"1.2.3.4", "4.3.2.1"},
+	}
+
+	for _, addrs := range testAddrs {
+		sl := &serverList{addrs: addrs}
+
+		if !sl.contains(addrs[0]) {
+			t.Errorf("Expected serverList to contain %s", addrs[0])
+		}
+		if v := sl.changed([]string{"9.9.9.9"}); !v {
+			t.Errorf("Expected serverList changed true, got: %t", v)
+		}
+		if v := sl.changed(addrs); v {
+			t.Errorf("Expected serverList changed false, got: %t", v)
+		}
+
+		var next int
+		if len(addrs) > 1 {
+			next = 1
+		}
+
+		if addr := sl.next(); addr != addrs[next] {
+			t.Errorf("Expected next addr %s, got %s", addrs[next], addr)
+		}
+
+		if v := sl.hasNext(); v {
+			t.Errorf("Expected hasNext false, got %t", v)
+		}
+	}
+}
+
 func TestEncodeDecodePacket(t *testing.T) {
 	encodeDecodeTest(t, &requestHeader{-2, 5})
 	encodeDecodeTest(t, &connectResponse{1, 2, 3, nil})
