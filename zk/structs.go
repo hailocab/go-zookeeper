@@ -608,6 +608,18 @@ func (s *serverList) changed(addrs []string) bool {
 		}
 	}
 
+	for _, addr := range s.addrs {
+		var seen bool
+		for _, a := range addrs {
+			if a == addr {
+				seen = true
+			}
+		}
+		if !seen {
+			return true
+		}
+	}
+
 	return false
 }
 

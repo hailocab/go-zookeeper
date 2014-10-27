@@ -23,6 +23,10 @@ func TestServerList(t *testing.T) {
 		if v := sl.changed(addrs); v {
 			t.Errorf("Expected serverList changed false, got: %t", v)
 		}
+		// dupe test
+		if v := sl.changed([]string{"1.2.3.4", "1.2.3.4"}); !v {
+			t.Errorf("Expected serverList changed true, got: %t", v)
+		}
 
 		var next int
 		if len(addrs) > 1 {
