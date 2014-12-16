@@ -50,12 +50,13 @@ type watchPathType struct {
 type Dialer func(network, address string, timeout time.Duration) (net.Conn, error)
 
 type Conn struct {
-	lastZxid  int64
-	sessionID int64
-	state     State // must be 32-bit aligned
-	xid       int32
-	timeout   int32 // session timeout in seconds
-	passwd    []byte
+	lastZxid       int64
+	lastDisconnect time.Time // the last time a disconnect was recognised
+	sessionID      int64
+	state          State // must be 32-bit aligned
+	xid            int32
+	timeout        int32 // session timeout in milliseconds
+	passwd         []byte
 
 	dialer         Dialer
 	conn           net.Conn
@@ -296,6 +297,12 @@ func (c *Conn) connect() error {
 		}
 
 		log.Warnf("[Zookeeper] Failed to connect to %s: %+v", server, err)
+
+		// If the disconnect occured more than the timeout ago, invalidate watches
+		if time.Now().After(c.lastDisconnect.Add(time.Duration(c.timeout) * time.Millisecond)) {
+			c.invalidateWatches(ErrConnectionClosed)
+		}
+
 		if !c.servers.hasNext() {
 			c.flushUnsentRequests(ErrNoServer)
 			time.Sleep(time.Second)
@@ -348,6 +355,7 @@ func (c *Conn) loop() {
 		}
 
 		c.setState(StateDisconnected)
+		c.lastDisconnect = time.Now()
 
 		log.Warnf("[Zookeeper] Error in loop %s", err.Error())
 
