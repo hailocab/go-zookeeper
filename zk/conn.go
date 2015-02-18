@@ -65,6 +65,7 @@ type Conn struct {
 	pingInterval   time.Duration
 	recvTimeout    time.Duration
 	connectTimeout time.Duration
+	configLock     sync.RWMutex
 
 	sendChan     chan *request
 	requests     map[int32]*request // Xid -> pending request
@@ -165,6 +166,12 @@ func (c *Conn) Close() {
 	case <-rspChan:
 	case <-time.After(time.Second):
 	}
+}
+
+func (c *Conn) SetRecvTimeout(recvTimeout time.Duration) {
+	c.configLock.Lock()
+	c.recvTimeout = recvTimeout
+	c.configLock.Unlock()
 }
 
 func (c *Conn) cycleNextServer() string {
@@ -564,7 +571,11 @@ func (c *Conn) sendLoop(conn net.Conn, closeChan <-chan bool) error {
 			c.requests[req.xid] = req
 			c.requestsLock.Unlock()
 
-			conn.SetWriteDeadline(time.Now().Add(c.recvTimeout))
+			c.configLock.RLock()
+			recvTimeout := c.recvTimeout
+			c.configLock.RUnlock()
+
+			conn.SetWriteDeadline(time.Now().Add(recvTimeout))
 			_, err = conn.Write(buf[:n+4])
 			conn.SetWriteDeadline(time.Time{})
 			if err != nil {
@@ -584,7 +595,11 @@ func (c *Conn) sendLoop(conn net.Conn, closeChan <-chan bool) error {
 
 			binary.BigEndian.PutUint32(buf[:4], uint32(n))
 
-			conn.SetWriteDeadline(time.Now().Add(c.recvTimeout))
+			c.configLock.RLock()
+			recvTimeout := c.recvTimeout
+			c.configLock.RUnlock()
+
+			conn.SetWriteDeadline(time.Now().Add(recvTimeout))
 			_, err = conn.Write(buf[:n+4])
 			conn.SetWriteDeadline(time.Time{})
 			if err != nil {
@@ -600,8 +615,13 @@ func (c *Conn) sendLoop(conn net.Conn, closeChan <-chan bool) error {
 func (c *Conn) recvLoop(conn net.Conn) error {
 	buf := make([]byte, bufferSize)
 	for {
+
+		c.configLock.RLock()
+		recvTimeout := c.recvTimeout
+		c.configLock.RUnlock()
+
 		// package length
-		conn.SetReadDeadline(time.Now().Add(c.pingInterval + c.recvTimeout)) // In theory we should get something within ping interval
+		conn.SetReadDeadline(time.Now().Add(c.pingInterval + recvTimeout)) // In theory we should get something within ping interval
 		_, err := io.ReadFull(conn, buf[:4])
 		if err != nil {
 			return err
