@@ -2,6 +2,7 @@ package zk
 
 import (
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -20,7 +21,7 @@ type TestCluster struct {
 	Servers []TestServer
 }
 
-func StartTestCluster(size int) (*TestCluster, error) {
+func StartTestCluster(size int, stdout, stderr io.Writer) (*TestCluster, error) {
 	tmpPath, err := ioutil.TempDir("", "gozk")
 	if err != nil {
 		return nil, err
@@ -74,6 +75,8 @@ func StartTestCluster(size int) (*TestCluster, error) {
 
 		srv := &Server{
 			ConfigPath: cfgPath,
+			Stdout:     stdout,
+			Stderr:     stderr,
 		}
 		if err := srv.Start(); err != nil {
 			return nil, err
@@ -94,13 +97,17 @@ func (ts *TestCluster) Connect(idx int) (*Conn, error) {
 	return zk, err
 }
 
-func (ts *TestCluster) ConnectAll() (*Conn, error) {
+func (ts *TestCluster) ConnectAll() (*Conn, <-chan Event, error) {
+	return ts.ConnectAllTimeout(time.Second * 15)
+}
+
+func (ts *TestCluster) ConnectAllTimeout(sessionTimeout time.Duration) (*Conn, <-chan Event, error) {
 	hosts := make([]string, len(ts.Servers))
 	for i, srv := range ts.Servers {
 		hosts[i] = fmt.Sprintf("127.0.0.1:%d", srv.Port)
 	}
-	zk, _, err := Connect(hosts, time.Second*15)
-	return zk, err
+	zk, ch, err := Connect(hosts, sessionTimeout)
+	return zk, ch, err
 }
 
 func (ts *TestCluster) Stop() error {
