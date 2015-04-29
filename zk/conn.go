@@ -61,7 +61,7 @@ type Conn struct {
 	dialer         Dialer
 	conn           net.Conn
 	eventChan      chan Event
-	shouldQuit     chan bool
+	shouldQuit     chan struct{}
 	pingInterval   time.Duration
 	recvTimeout    time.Duration
 	connectTimeout time.Duration
@@ -106,44 +106,64 @@ type response struct {
 }
 
 type Event struct {
-	Type  EventType
-	State State
-	Path  string // For non-session events, the path of the watched node.
-	Err   error
+	Type   EventType
+	State  State
+	Path   string // For non-session events, the path of the watched node.
+	Err    error
+	Server string // For connection events
 }
 
-func Connect(servers []string, recvTimeout time.Duration) (*Conn, <-chan Event, error) {
-	return ConnectWithDialer(servers, recvTimeout, nil)
+// Connect establishes a new connection to a pool of zookeeper servers
+// using the default net.Dialer. See ConnectWithDialer for further
+// information about session timeout.
+func Connect(servers []string, sessionTimeout time.Duration) (*Conn, <-chan Event, error) {
+	return ConnectWithDialer(servers, sessionTimeout, nil)
 }
 
-func ConnectWithDialer(servers []string, recvTimeout time.Duration, dialer Dialer) (*Conn, <-chan Event, error) {
+// ConnectWithDialer establishes a new connection to a pool of zookeeper
+// servers. The provided session timeout sets the amount of time for which
+// a session is considered valid after losing connection to a server. Within
+// the session timeout it's possible to reestablish a connection to a different
+// server and keep the same session. This is means any ephemeral nodes and
+// watches are maintained.
+func ConnectWithDialer(servers []string, sessionTimeout time.Duration, dialer Dialer) (*Conn, <-chan Event, error) {
+	if len(servers) == 0 {
+		return nil, nil, errors.New("zk: server list must not be empty")
+	}
+
+	recvTimeout := sessionTimeout * 2 / 3
+
+	srvs := make([]string, len(servers))
+
 	for i, addr := range servers {
-		if !strings.Contains(addr, ":") {
-			servers[i] = addr + ":" + strconv.Itoa(DefaultPort)
+		if strings.Contains(addr, ":") {
+			srvs[i] = addr
+		} else {
+			srvs[i] = addr + ":" + strconv.Itoa(DefaultPort)
 		}
 	}
+
 	ec := make(chan Event, eventChanSize)
 	if dialer == nil {
 		dialer = net.DialTimeout
 	}
 	r := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
 	startIndex := r.Intn(len(servers))
-	timeout := int32(30000)
 	conn := Conn{
 		dialer:         dialer,
 		servers:        &serverList{addrs: servers, index: startIndex},
 		conn:           nil,
 		state:          StateDisconnected,
 		eventChan:      ec,
-		shouldQuit:     make(chan bool),
+		shouldQuit:     make(chan struct{}),
 		recvTimeout:    recvTimeout,
-		pingInterval:   time.Duration(timeout/3) * time.Millisecond, // ping is 1/3 timeout
+		pingInterval:   time.Duration(sessionTimeout/3) * time.Millisecond, // ping is 1/3 timeout
 		connectTimeout: 1 * time.Second,
 		sendChan:       make(chan *request, sendChanSize),
 		requests:       make(map[int32]*request),
 		watchers:       make(map[watchPathType][]chan Event),
 		passwd:         emptyPassword,
-		timeout:        timeout,
+		timeout:        int32(sessionTimeout.Nanoseconds() / time.Millisecond.Nanoseconds()),
 
 		// Debug
 		reconnectDelay: 0,
@@ -278,7 +298,7 @@ func (c *Conn) State() State {
 func (c *Conn) setState(state State) {
 	atomic.StoreInt32((*int32)(&c.state), int32(state))
 	select {
-	case c.eventChan <- Event{Type: EventSession, State: state}:
+	case c.eventChan <- Event{Type: EventSession, State: state, Server: c.servers.current()}:
 	default:
 		// panic("zk: event channel full - it must be monitored and never allowed to be full")
 	}
@@ -305,7 +325,15 @@ func (c *Conn) connect() error {
 
 		if !c.servers.hasNext() {
 			c.flushUnsentRequests(ErrNoServer)
-			time.Sleep(time.Second)
+
+			select {
+			case <-time.After(time.Second):
+				// pass
+			case <-c.shouldQuit:
+				c.setState(StateDisconnected)
+				c.flushUnsentRequests(ErrClosing)
+				return ErrClosing
+			}
 		}
 
 		// should we bail? we don't want to lock here forever if something has called Close()
@@ -331,7 +359,7 @@ func (c *Conn) loop() {
 		case err != nil && c.conn != nil:
 			c.conn.Close()
 		case err == nil:
-			closeChan := make(chan bool) // channel to tell send loop stop
+			closeChan := make(chan struct{}) // channel to tell send loop stop
 			var wg sync.WaitGroup
 
 			wg.Add(1)
@@ -456,8 +484,7 @@ func (c *Conn) sendSetWatches() {
 		res := &setWatchesResponse{}
 		_, err := c.request(opSetWatches, req, res, nil)
 		if err != nil {
-			log.Criticalf("[Zookeeper] %s", err.Error())
-			panic(err)
+			log.Criticalf("[Zookeeper] Failed to set previous watches %s", err.Error())
 		}
 	}()
 }
@@ -480,13 +507,17 @@ func (c *Conn) authenticate() error {
 
 	binary.BigEndian.PutUint32(buf[:4], uint32(n))
 
+	c.conn.SetWriteDeadline(time.Now().Add(c.recvTimeout * 10))
 	_, err = c.conn.Write(buf[:n+4])
+	c.conn.SetWriteDeadline(time.Time{})
 	if err != nil {
 		return err
 	}
 
 	// package length
+	c.conn.SetReadDeadline(time.Now().Add(c.recvTimeout * 10))
 	_, err = io.ReadFull(c.conn, buf[:4])
+	c.conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return err
 	}
@@ -527,7 +558,7 @@ func (c *Conn) authenticate() error {
 	return nil
 }
 
-func (c *Conn) sendLoop(conn net.Conn, closeChan <-chan bool) error {
+func (c *Conn) sendLoop(conn net.Conn, closeChan <-chan struct{}) error {
 	pingTicker := time.NewTicker(c.pingInterval)
 	defer pingTicker.Stop()
 
@@ -898,33 +929,42 @@ func (c *Conn) Sync(path string) (string, error) {
 	return res.Path, err
 }
 
-type MultiOps struct {
-	Create  []CreateRequest
-	Delete  []DeleteRequest
-	SetData []SetDataRequest
-	Check   []CheckVersionRequest
+type MultiResponse struct {
+	Stat   *Stat
+	String string
 }
 
-func (c *Conn) Multi(ops MultiOps) error {
+// Multi executes multiple ZooKeeper operations or none of them. The provided
+// ops must be one of *CreateRequest, *DeleteRequest, *SetDataRequest, or
+// *CheckVersionRequest.
+func (c *Conn) Multi(ops ...interface{}) ([]MultiResponse, error) {
 	req := &multiRequest{
-		Ops:        make([]multiRequestOp, 0, len(ops.Create)+len(ops.Delete)+len(ops.SetData)+len(ops.Check)),
+		Ops:        make([]multiRequestOp, 0, len(ops)),
 		DoneHeader: multiHeader{Type: -1, Done: true, Err: -1},
 	}
-	for _, r := range ops.Create {
-		req.Ops = append(req.Ops, multiRequestOp{multiHeader{opCreate, false, -1}, r})
-	}
-	for _, r := range ops.SetData {
-		req.Ops = append(req.Ops, multiRequestOp{multiHeader{opSetData, false, -1}, r})
-	}
-	for _, r := range ops.Delete {
-		req.Ops = append(req.Ops, multiRequestOp{multiHeader{opDelete, false, -1}, r})
-	}
-	for _, r := range ops.Check {
-		req.Ops = append(req.Ops, multiRequestOp{multiHeader{opCheck, false, -1}, r})
+	for _, op := range ops {
+		var opCode int32
+		switch op.(type) {
+		case *CreateRequest:
+			opCode = opCreate
+		case *SetDataRequest:
+			opCode = opSetData
+		case *DeleteRequest:
+			opCode = opDelete
+		case *CheckVersionRequest:
+			opCode = opCheck
+		default:
+			return nil, fmt.Errorf("uknown operation type %T", op)
+		}
+		req.Ops = append(req.Ops, multiRequestOp{multiHeader{opCode, false, -1}, op})
 	}
 	res := &multiResponse{}
 	_, err := c.request(opMulti, req, res, nil)
-	return err
+	mr := make([]MultiResponse, len(res.Ops))
+	for i, op := range res.Ops {
+		mr[i] = MultiResponse{Stat: op.Stat, String: op.String}
+	}
+	return mr, err
 }
 
 func (c *Conn) NewLock(path string, acl []ACL) Locker {
