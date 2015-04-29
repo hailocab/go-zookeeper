@@ -149,7 +149,6 @@ func ConnectWithDialer(servers []string, sessionTimeout time.Duration, dialer Di
 	}
 	r := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
 	startIndex := r.Intn(len(servers))
-	timeout := int32(30000)
 	conn := Conn{
 		dialer:         dialer,
 		servers:        &serverList{addrs: servers, index: startIndex},
@@ -158,13 +157,13 @@ func ConnectWithDialer(servers []string, sessionTimeout time.Duration, dialer Di
 		eventChan:      ec,
 		shouldQuit:     make(chan struct{}),
 		recvTimeout:    recvTimeout,
-		pingInterval:   time.Duration(timeout/3) * time.Millisecond, // ping is 1/3 timeout
+		pingInterval:   time.Duration(sessionTimeout/3) * time.Millisecond, // ping is 1/3 timeout
 		connectTimeout: 1 * time.Second,
 		sendChan:       make(chan *request, sendChanSize),
 		requests:       make(map[int32]*request),
 		watchers:       make(map[watchPathType][]chan Event),
 		passwd:         emptyPassword,
-		timeout:        timeout,
+		timeout:        int32(sessionTimeout.Nanoseconds() / time.Millisecond.Nanoseconds()),
 
 		// Debug
 		reconnectDelay: 0,
