@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/hailocab/go-hostpool"
 	"io"
 	mathrand "math/rand"
 	"net"
@@ -73,8 +74,9 @@ type Conn struct {
 	watchersLock sync.Mutex
 
 	// servers config
-	serversLock                     sync.Mutex // guards serverLists', reconfig, pNew, pOld
+	serversLock                     sync.Mutex // guards serverLists', currentServer, reconfig, pNew, pOld
 	servers, oldServers, newServers *serverList
+	currentServer                   hostpool.HostPoolResponse
 	reconfig                        bool
 	pNew                            float64
 	pOld                            float64
@@ -126,12 +128,10 @@ func ConnectWithDialer(servers []string, recvTimeout time.Duration, dialer Diale
 	if dialer == nil {
 		dialer = net.DialTimeout
 	}
-	r := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
-	startIndex := r.Intn(len(servers))
 	timeout := int32(30000)
 	conn := Conn{
 		dialer:         dialer,
-		servers:        &serverList{addrs: servers, index: startIndex},
+		servers:        &serverList{addrs: servers, hp: hostpool.New(servers)},
 		conn:           nil,
 		state:          StateDisconnected,
 		eventChan:      ec,
@@ -180,21 +180,32 @@ func (c *Conn) cycleNextServer() string {
 		c.reconfig = false
 	}
 
-	return c.servers.next()
+	hpr := c.servers.next()
+	c.currentServer = hpr
+
+	return hpr.Host()
 }
 
 func (c *Conn) getNextServerInReconfig() (string, error) {
 	takeNew := mathrand.Float64() <= c.pNew
 
 	if (c.newServers != nil && c.newServers.hasNext()) && (takeNew || (c.oldServers != nil && !c.oldServers.hasNext())) {
-		return c.newServers.next(), nil
+		server := c.updateCurrentServer(c.newServers.next())
+		return server, nil
 	}
 
 	if c.oldServers != nil && c.oldServers.hasNext() {
-		return c.oldServers.next(), nil
+		server := c.updateCurrentServer(c.oldServers.next())
+		return server, nil
 	}
 
 	return "", fmt.Errorf("Could not find next server")
+}
+
+func (c *Conn) updateCurrentServer(hpr hostpool.HostPoolResponse) string {
+	c.currentServer = hpr
+
+	return hpr.Host()
 }
 
 func (c *Conn) UpdateAddrs(addrs []string) error {
@@ -215,8 +226,8 @@ func (c *Conn) UpdateAddrs(addrs []string) error {
 		}
 	}
 
-	servers := &serverList{addrs: addrs}
-	foundCurrent := servers.contains(c.servers.addrs[c.servers.index])
+	servers := &serverList{addrs: addrs, hp: hostpool.New(addrs)}
+	foundCurrent := servers.contains(c.currentServer.Host())
 	c.reconfig = true
 	c.oldServers = &serverList{}
 	c.newServers = &serverList{}
@@ -290,6 +301,7 @@ func (c *Conn) connect() error {
 	for {
 		server := c.cycleNextServer()
 		zkConn, err := c.dialer("tcp", server, c.connectTimeout)
+		c.currentServer.Mark(err)
 		if err == nil {
 			c.conn = zkConn
 			c.setState(StateConnected)
@@ -368,6 +380,7 @@ func (c *Conn) loop() {
 
 		if err != ErrSessionExpired {
 			err = ErrConnectionClosed
+			c.currentServer.Mark(err)
 		}
 		c.flushRequests(err)
 

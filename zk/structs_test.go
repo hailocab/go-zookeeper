@@ -1,6 +1,7 @@
 package zk
 
 import (
+	"github.com/hailocab/go-hostpool"
 	"reflect"
 	"testing"
 )
@@ -12,7 +13,7 @@ func TestServerList(t *testing.T) {
 	}
 
 	for _, addrs := range testAddrs {
-		sl := &serverList{addrs: addrs}
+		sl := &serverList{addrs: addrs, hp: hostpool.New(addrs)}
 
 		if !sl.contains(addrs[0]) {
 			t.Errorf("Expected serverList to contain %s", addrs[0])
@@ -33,7 +34,7 @@ func TestServerList(t *testing.T) {
 			next = 1
 		}
 
-		if addr := sl.next(); addr != addrs[next] {
+		if addr := sl.next(); addr.Host() != addrs[next] {
 			t.Errorf("Expected next addr %s, got %s", addrs[next], addr)
 		}
 
