@@ -623,6 +623,14 @@ func (s *serverList) changed(addrs []string) bool {
 	return false
 }
 
+func (s *serverList) current() string {
+	l := len(s.addrs)
+	if l == 0 || s.index >= l || s.index < 0 {
+		return ""
+	}
+	return s.addrs[s.index]
+}
+
 func (s *serverList) next() string {
 	s.index = (s.index + 1) % len(s.addrs)
 	return s.addrs[s.index]

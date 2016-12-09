@@ -930,3 +930,9 @@ func (c *Conn) Multi(ops MultiOps) error {
 func (c *Conn) NewLock(path string, acl []ACL) Locker {
 	return NewLock(c, path, acl)
 }
+
+func (c *Conn) Server() string {
+	c.serversLock.Lock()
+	defer c.serversLock.Unlock()
+	return c.servers.current()
+}
