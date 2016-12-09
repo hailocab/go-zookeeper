@@ -9,7 +9,9 @@ import (
 )
 
 var (
-	ErrDeadlock    = errors.New("zk: trying to acquire a lock twice")
+	// ErrDeadlock is returned by Lock when trying to lock twice without unlocking first
+	ErrDeadlock = errors.New("zk: trying to acquire a lock twice")
+	// ErrNotLocked is returned by Unlock when trying to release a lock that has not first be acquired.
 	ErrNotLocked   = errors.New("zk: not locked")
 	ErrLockTimeout = errors.New("zk: timeout trying to acquire lock")
 )
@@ -21,6 +23,7 @@ type Locker interface {
 	SetTimeout(time.Duration)
 }
 
+// Lock is a mutual exclusion lock.
 type Lock struct {
 	c                  *Conn
 	path               string
@@ -31,6 +34,9 @@ type Lock struct {
 	ttl                time.Duration
 }
 
+// NewLock creates a new lock instance using the provided connection, path, and acl.
+// The path must be a node that is only used by this lock. A lock instances starts
+// unlocked until Lock() is called.
 func NewLock(c *Conn, path string, acl []ACL) *Lock {
 	return &Lock{
 		c:    c,
@@ -54,7 +60,9 @@ func (l *Lock) SetTTL(d time.Duration) {
 	l.ttl = d
 }
 
-// Lock attempts to acquire a lock.
+// Lock attempts to acquire the lock. It will wait to return until the lock
+// is acquired or an error occurs. If this instance already has the lock
+// then ErrDeadlock is returned.
 // Uses the recipe http://zookeeper.apache.org/doc/trunk/recipes.html#sc_recipes_Locks.
 // Timeout achieved by first creating the lock node and then waiting X secs. If lock not yet acquired it will delete and then return.
 // Does not account for initial request taking too long
@@ -145,7 +153,7 @@ func (l *Lock) findLowestSequenceNode(seq int) (lowestSeq int, prevSeqPath strin
 
 	var ttl time.Time
 	lowestSeq = seq
-	prevSeq := 0
+	prevSeq := -1
 	prevSeqPath = ""
 	for _, p := range children {
 		// check if this lock has timed out TODO keep this?
@@ -187,6 +195,8 @@ func (l *Lock) cleanUpTimeoutLock(path string) error {
 	return ErrLockTimeout
 }
 
+// Unlock releases an acquired lock. If the lock is not currently acquired by
+// this Lock instance than ErrNotLocked is returned.
 func (l *Lock) Unlock() error {
 	if l.lockPath == "" {
 		return ErrNotLocked
