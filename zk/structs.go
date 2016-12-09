@@ -3,8 +3,10 @@ package zk
 import (
 	"encoding/binary"
 	"errors"
+	"log"
 	"reflect"
 	"runtime"
+	"time"
 )
 
 var (
@@ -12,6 +14,12 @@ var (
 	ErrPtrExpected        = errors.New("zk: encode/decode expect a non-nil pointer to struct")
 	ErrShortBuffer        = errors.New("zk: buffer too small")
 )
+
+type defaultLogger struct{}
+
+func (defaultLogger) Printf(format string, a ...interface{}) {
+	log.Printf(format, a...)
+}
 
 type ACL struct {
 	Perms  int32
@@ -36,6 +44,54 @@ type Stat struct {
 type serverList struct {
 	addrs []string
 	index int
+}
+
+// ServerClient is the information for a single Zookeeper client and its session.
+// This is used to parse/extract the output fo the `cons` command.
+type ServerClient struct {
+	Queued        int64
+	Received      int64
+	Sent          int64
+	SessionID     int64
+	Lcxid         int64
+	Lzxid         int64
+	Timeout       int32
+	LastLatency   int32
+	MinLatency    int32
+	AvgLatency    int32
+	MaxLatency    int32
+	Established   time.Time
+	LastResponse  time.Time
+	Addr          string
+	LastOperation string // maybe?
+	Error         error
+}
+
+// ServerClients is a struct for the FLWCons() function. It's used to provide
+// the list of Clients.
+//
+// This is needed because FLWCons() takes multiple servers.
+type ServerClients struct {
+	Clients []*ServerClient
+	Error   error
+}
+
+// ServerStats is the information pulled from the Zookeeper `stat` command.
+type ServerStats struct {
+	Sent        int64
+	Received    int64
+	NodeCount   int64
+	MinLatency  int64
+	AvgLatency  int64
+	MaxLatency  int64
+	Connections int64
+	Outstanding int64
+	Epoch       int32
+	Counter     int32
+	BuildTime   time.Time
+	Mode        Mode
+	Version     string
+	Error       error
 }
 
 type requestHeader struct {
@@ -219,6 +275,7 @@ type multiResponseOp struct {
 	Header multiHeader
 	String string
 	Stat   *Stat
+	Err    ErrCode
 }
 type multiResponse struct {
 	Ops        []multiResponseOp
@@ -276,6 +333,8 @@ func (r *multiRequest) Decode(buf []byte) (int, error) {
 }
 
 func (r *multiResponse) Decode(buf []byte) (int, error) {
+	var multiErr error
+
 	r.Ops = make([]multiResponseOp, 0)
 	r.DoneHeader = multiHeader{-1, true, -1}
 	total := 0
@@ -296,6 +355,8 @@ func (r *multiResponse) Decode(buf []byte) (int, error) {
 		switch header.Type {
 		default:
 			return total, ErrAPIError
+		case opError:
+			w = reflect.ValueOf(&res.Err)
 		case opCreate:
 			w = reflect.ValueOf(&res.String)
 		case opSetData:
@@ -311,8 +372,12 @@ func (r *multiResponse) Decode(buf []byte) (int, error) {
 			total += n
 		}
 		r.Ops = append(r.Ops, res)
+		if multiErr == nil && res.Err != errOk {
+			// Use the first error as the error returned from Multi().
+			multiErr = res.Err.toError()
+		}
 	}
-	return total, nil
+	return total, multiErr
 }
 
 type watcherEvent struct {

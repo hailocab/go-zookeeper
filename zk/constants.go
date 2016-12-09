@@ -28,18 +28,19 @@ const (
 	opClose        = -11
 	opSetAuth      = 100
 	opSetWatches   = 101
+	opError        = -1
 	// Not in protocol, used internally
 	opWatcherEvent = -2
 )
 
 const (
-	EventNodeCreated         = EventType(1)
-	EventNodeDeleted         = EventType(2)
-	EventNodeDataChanged     = EventType(3)
-	EventNodeChildrenChanged = EventType(4)
+	EventNodeCreated         EventType = 1
+	EventNodeDeleted         EventType = 2
+	EventNodeDataChanged     EventType = 3
+	EventNodeChildrenChanged EventType = 4
 
-	EventSession     = EventType(-1)
-	EventNotWatching = EventType(-2)
+	EventSession     EventType = -1
+	EventNotWatching EventType = -2
 )
 
 var (
@@ -54,15 +55,13 @@ var (
 )
 
 const (
-	StateUnknown           = State(-1)
-	StateDisconnected      = State(0)
-	StateConnecting        = State(1)
-	StateSyncConnected     = State(3)
-	StateAuthFailed        = State(4)
-	StateConnectedReadOnly = State(5)
-	StateSaslAuthenticated = State(6)
-	StateExpired           = State(-112)
-	// StateAuthFailed        = State(-113)
+	StateUnknown           State = -1
+	StateDisconnected      State = 0
+	StateConnecting        State = 1
+	StateAuthFailed        State = 4
+	StateConnectedReadOnly State = 5
+	StateSaslAuthenticated State = 6
+	StateExpired           State = -112
 
 	StateConnected  = State(100)
 	StateHasSession = State(101)
@@ -77,7 +76,6 @@ var (
 	stateNames = map[State]string{
 		StateUnknown:           "StateUnknown",
 		StateDisconnected:      "StateDisconnected",
-		StateSyncConnected:     "StateSyncConnected",
 		StateConnectedReadOnly: "StateConnectedReadOnly",
 		StateSaslAuthenticated: "StateSaslAuthenticated",
 		StateExpired:           "StateExpired",
@@ -157,20 +155,20 @@ const (
 	errBadArguments         = -8
 	errInvalidState         = -9
 	// API errors
-	errAPIError                = ErrCode(-100)
-	errNoNode                  = ErrCode(-101) // *
-	errNoAuth                  = ErrCode(-102)
-	errBadVersion              = ErrCode(-103) // *
-	errNoChildrenForEphemerals = ErrCode(-108)
-	errNodeExists              = ErrCode(-110) // *
-	errNotEmpty                = ErrCode(-111)
-	errSessionExpired          = ErrCode(-112)
-	errInvalidCallback         = ErrCode(-113)
-	errInvalidAcl              = ErrCode(-114)
-	errAuthFailed              = ErrCode(-115)
-	errClosing                 = ErrCode(-116)
-	errNothing                 = ErrCode(-117)
-	errSessionMoved            = ErrCode(-118)
+	errAPIError                ErrCode = -100
+	errNoNode                  ErrCode = -101 // *
+	errNoAuth                  ErrCode = -102
+	errBadVersion              ErrCode = -103 // *
+	errNoChildrenForEphemerals ErrCode = -108
+	errNodeExists              ErrCode = -110 // *
+	errNotEmpty                ErrCode = -111
+	errSessionExpired          ErrCode = -112
+	errInvalidCallback         ErrCode = -113
+	errInvalidAcl              ErrCode = -114
+	errAuthFailed              ErrCode = -115
+	errClosing                 ErrCode = -116
+	errNothing                 ErrCode = -117
+	errSessionMoved            ErrCode = -118
 )
 
 // Constants for ACL permissions
@@ -216,3 +214,28 @@ func (t EventType) String() string {
 	}
 	return "Unknown"
 }
+
+// Mode is used to build custom server modes (leader|follower|standalone).
+type Mode uint8
+
+func (m Mode) String() string {
+	if name := modeNames[m]; name != "" {
+		return name
+	}
+	return "unknown"
+}
+
+const (
+	ModeUnknown    Mode = iota
+	ModeLeader     Mode = iota
+	ModeFollower   Mode = iota
+	ModeStandalone Mode = iota
+)
+
+var (
+	modeNames = map[Mode]string{
+		ModeLeader:     "leader",
+		ModeFollower:   "follower",
+		ModeStandalone: "standalone",
+	}
+)
